@@ -2,9 +2,9 @@
 setlocal enabledelayedexpansion
 
 REM ============================================================================
-REM Enhanced RDP Wrapper Management Script v3.0.0
+REM Enhanced RDP Wrapper Management Script v3.5.0
 REM Author: Mikhail Deynekin <m@deynekin.com>
-REM Repository: https://github.com/mdeynekin/rdp-wrapper-manager
+REM Repository: https://github.com/paulmann/RDP-Wrapper-Autoupdate/
 REM ============================================================================
 REM Professional RDP Wrapper installation and management tool
 REM Supports automatic configuration discovery and intelligent updates
@@ -557,22 +557,51 @@ REM Get termsrv.dll version and extract clean version number
 set "TERMSRV_VERSION=0.0.0.0"
 set "TERMSRV_VERSION_CLEAN=0.0.0.0"
 
-REM Use PowerShell to get file version
-set "ps_command=$file = '%windir%\\System32\\termsrv.dll'; if (Test-Path $file) { (Get-Item $file).VersionInfo.FileVersion } else { '0.0.0.0' }"
+REM Используем VBScript для получения версии файла (как в рабочем скрипте)
+set "VBS_SCRIPT=%TEMP%\getversion.vbs"
 
-for /f "delims=" %%v in ('powershell -Command "!ps_command!" 2^>nul') do (
+REM Создаем VBScript файл
+(
+echo Set fso = CreateObject^("Scripting.FileSystemObject"^)
+echo WScript.Echo fso.GetFileVersion^("%windir%\System32\termsrv.dll"^)
+) > "%VBS_SCRIPT%"
+
+REM Выполняем VBScript
+for /f "tokens=*" %%v in ('cscript //nologo "%VBS_SCRIPT%" 2^>nul') do (
     set "TERMSRV_VERSION=%%v"
 )
 
-REM Extract clean version (remove anything after space)
-for /f "tokens=1" %%a in ("!TERMSRV_VERSION!") do (
-    set "TERMSRV_VERSION_CLEAN=%%a"
+REM Удаляем временный VBScript файл
+if exist "%VBS_SCRIPT%" del "%VBS_SCRIPT%" >nul 2>&1
+
+REM Если VBScript не сработал, пытаемся через PowerShell
+if "!TERMSRV_VERSION!"=="0.0.0.0" (
+    set "ps_command=$file = '%windir%\\System32\\termsrv.dll'; if (Test-Path $file) { (Get-Item $file).VersionInfo.FileVersionRaw.ToString() } else { '0.0.0.0' }"
+    for /f "delims=" %%v in ('powershell -Command "!ps_command!" 2^>nul') do (
+        set "TERMSRV_VERSION=%%v"
+    )
 )
 
-REM If PowerShell failed, try alternative method
-if "!TERMSRV_VERSION_CLEAN!"=="0.0.0.0" (
+REM Еще один альтернативный метод через WMIC
+if "!TERMSRV_VERSION!"=="0.0.0.0" (
     for /f "tokens=2 delims==" %%v in ('wmic datafile where "name='%windir%\\System32\\termsrv.dll'" get version /value 2^>nul') do (
-        set "TERMSRV_VERSION_CLEAN=%%v"
+        set "TERMSRV_VERSION=%%v"
+    )
+)
+
+REM Убираем лишние пробелы и символы
+set "TERMSRV_VERSION=!TERMSRV_VERSION: =!"
+set "TERMSRV_VERSION_CLEAN=!TERMSRV_VERSION!"
+
+REM Если все еще не получили версию, используем файловый хэш как альтернативу
+if "!TERMSRV_VERSION_CLEAN!"=="0.0.0.0" (
+    echo [WARNING] Cannot get termsrv.dll version, using fallback method
+    REM Получаем дату изменения файла как альтернативу
+    for /f "tokens=1-3 delims=/ " %%a in ('dir /tc "%windir%\System32\termsrv.dll" ^| find "termsrv.dll"') do (
+        set "file_date=%%c%%a%%b"
+    )
+    if defined file_date (
+        set "TERMSRV_VERSION_CLEAN=10.0.%file_date%.0"
     )
 )
 
@@ -608,6 +637,13 @@ REM Flow for when running as updater (RDPWInst.exe found)
 echo [INFO] Checking current configuration...
 call :check_current_config
 
+REM Проверяем, правильно ли определилась версия
+if "!TERMSRV_VERSION_CLEAN!"=="0.0.0.0" (
+    echo [ERROR] Failed to detect termsrv.dll version
+    echo [INFO] Trying alternative detection method...
+    call :get_termsrv_version_alternative
+)
+
 if !CONFIG_VALID! equ 1 (
     echo [SUCCESS] Current configuration supports Windows !WIN_VERSION!^(!TERMSRV_VERSION_CLEAN!^)
     call :verify_service_state
@@ -625,6 +661,49 @@ if !CONFIG_VALID! equ 1 (
         echo [INFO] Consider manual update of rdpwrap.ini or Windows rollback
     )
 )
+goto :eof
+
+:get_termsrv_version_alternative
+REM Альтернативный метод получения версии termsrv.dll
+set "TERMSRV_VERSION_CLEAN=0.0.0.0"
+
+REM Используем строку из самого файла для определения версии
+findstr /c:"FileVersion" "%windir%\System32\termsrv.dll" > "%TEMP%\termsrv_ver.txt" 2>nul
+if exist "%TEMP%\termsrv_ver.txt" (
+    for /f "tokens=2 delims=," %%a in ('type "%TEMP%\termsrv_ver.txt" ^| find "FileVersion"') do (
+        set "ver_string=%%a"
+        REM Извлекаем только числа версии
+        for /f "tokens=1-4 delims=." %%b in ("!ver_string!") do (
+            set "v1=%%b"
+            set "v2=%%c"
+            set "v3=%%d"
+            set "v4=%%e"
+        )
+        REM Очищаем от нечисловых символов
+        set "v1=!v1: =!"
+        set "v2=!v2: =!"
+        set "v3=!v3: =!"
+        set "v4=!v4: =!"
+        for /f "delims=0123456789" %%i in ("!v1!") do set "v1=!v1:%%i=!"
+        for /f "delims=0123456789" %%i in ("!v2!") do set "v2=!v2:%%i=!"
+        for /f "delims=0123456789" %%i in ("!v3!") do set "v3=!v3:%%i=!"
+        for /f "delims=0123456789" %%i in ("!v4!") do set "v4=!v4:%%i=!"
+        
+        if "!v1!!v2!!v3!!v4!" neq "" (
+            set "TERMSRV_VERSION_CLEAN=!v1!.!v2!.!v3!.!v4!"
+        )
+    )
+    del "%TEMP%\termsrv_ver.txt" >nul 2>&1
+)
+
+if "!TERMSRV_VERSION_CLEAN!"=="0.0.0.0" (
+    echo [WARNING] Using Windows build number as version fallback
+    for /f "tokens=2 delims==" %%v in ('wmic os get version /value') do (
+        set "win_build=%%v"
+    )
+    set "TERMSRV_VERSION_CLEAN=10.0.!win_build!.0"
+)
+
 goto :eof
 
 :check_current_config
@@ -647,8 +726,10 @@ set "CHECKED_COUNT=0"
 set "SUCCESS_COUNT=0"
 
 echo [INFO] Repository search started at: !SEARCH_START!
+echo [INFO] Searching for version: !TERMSRV_VERSION_CLEAN!
 echo.
 
+REM Сначала ищем точное совпадение
 for /l %%i in (1,1,%REPO_COUNT%) do (
     set "repo_name=!REPO[%%i].NAME!"
     set "repo_url=!REPO[%%i].URL!"
@@ -662,22 +743,31 @@ for /l %%i in (1,1,%REPO_COUNT%) do (
         call :download_with_powershell "!repo_url!" "%TEMP_INI%"
         
         if exist "%TEMP_INI%" (
-            REM Check file size
             for %%F in ("%TEMP_INI%") do set "filesize=%%~zF"
             if !filesize! leq 0 (
                 echo [SKIP] Downloaded file is empty
                 del "%TEMP_INI%" >nul 2>&1
             ) else (
                 set /a "SUCCESS_COUNT+=1"
+                REM Ищем точное совпадение
                 findstr /c:"[!TERMSRV_VERSION_CLEAN!]" "%TEMP_INI%" >nul
                 if %ERRORLEVEL% equ 0 (
                     set "CONFIG_FOUND=1"
                     set "FOUND_REPO=!repo_name!"
                     set "CONFIG_PATH=%TEMP_INI%"
-                    echo [SUCCESS] Compatible configuration found at repository !CHECKED_COUNT!
+                    echo [SUCCESS] Exact version match found at repository !CHECKED_COUNT!
                     goto :eof
                 ) else (
-                    echo [SKIP] Version !TERMSRV_VERSION_CLEAN! not supported
+                    REM Если точное совпадение не найдено, ищем похожие версии
+                    echo [INFO] Exact version not found, searching for similar versions...
+                    call :find_compatible_version "%TEMP_INI%"
+                    if !COMPATIBLE_VERSION_FOUND! equ 1 (
+                        set "CONFIG_FOUND=1"
+                        set "FOUND_REPO=!repo_name!"
+                        set "CONFIG_PATH=%TEMP_INI%"
+                        echo [SUCCESS] Compatible version !COMPATIBLE_VERSION! found at repository !CHECKED_COUNT!
+                        goto :eof
+                    )
                     del "%TEMP_INI%" >nul 2>&1
                 )
             )
@@ -692,6 +782,52 @@ for /l %%i in (1,1,%REPO_COUNT%) do (
 set "SEARCH_END=%TIME%"
 echo [INFO] Search completed at: !SEARCH_END!
 echo [INFO] Checked: !CHECKED_COUNT! repositories, Successfully downloaded: !SUCCESS_COUNT!
+goto :eof
+
+:find_compatible_version
+REM Ищем совместимые версии в INI файле
+set "COMPATIBLE_VERSION_FOUND=0"
+set "COMPATIBLE_VERSION="
+set "ini_file=%~1"
+
+if not exist "!ini_file!" goto :eof
+
+REM Разбиваем текущую версию на компоненты
+for /f "tokens=1-4 delims=." %%a in ("!TERMSRV_VERSION_CLEAN!") do (
+    set "current_major=%%a"
+    set "current_minor=%%b"
+    set "current_build=%%c"
+    set "current_revision=%%d"
+)
+
+REM Ищем версии в INI файле
+for /f "tokens=*" %%v in ('findstr /r "\[[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" "!ini_file!"') do (
+    set "line=%%v"
+    set "line=!line:~1!"
+    
+    for /f "tokens=1 delims=]" %%a in ("!line!") do (
+        set "version=%%a"
+        echo !version! | findstr /r "^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
+        if !errorlevel! equ 0 (
+            REM Разбиваем найденную версию на компоненты
+            for /f "tokens=1-4 delims=." %%b in ("!version!") do (
+                set "found_major=%%b"
+                set "found_minor=%%c"
+                set "found_build=%%d"
+                set "found_revision=%%e"
+            )
+            
+            REM Проверяем совместимость (мажорная и минорная версии должны совпадать)
+            if "!found_major!.!found_minor!"=="!current_major!.!current_minor!" (
+                if !found_build! leq !current_build! (
+                    set "COMPATIBLE_VERSION=!version!"
+                    set "COMPATIBLE_VERSION_FOUND=1"
+                    goto :eof
+                )
+            )
+        )
+    )
+)
 goto :eof
 
 :search_comprehensive
